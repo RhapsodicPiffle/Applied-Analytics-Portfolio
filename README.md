@@ -1,0 +1,2 @@
+# Applied Analytics Portfolio
+A curated collection of cross‑domain statistical analyses demonstrating professional‑grade analytical methods, including descriptive statistics, inferential testing (ANOVA, ANCOVA), regression modeling, clustering, and experimental design with simulated A/B tests. This repository highlights end‑to‑end analytical workflows, clear statistical reasoning, and data‑driven insights suitable for real‑world business decision‑making
