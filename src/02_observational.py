@@ -183,6 +183,17 @@ def get_ratio_meta(col: str) -> dict:
     return {"label": col, "short": col, "color": "#888888", "direction": ""}
 
 
+# ── Restricted re-analysis config ─────────────────────────────────────────────
+# After the initial clustering identifies minority/outlier clusters, list their
+# 0-based indices here to trigger a second pass that excludes those households.
+# Cluster N displayed in output = index N-1 here. Set to [] to skip.
+RESTRICTED_EXCLUDE_CLUSTER_INDICES: list = [2, 4]   # Clusters 3 & 5
+
+# Names for the restricted-run clusters.  Fill in after reviewing the
+# restricted cluster profiles that are printed during that second pass.
+RESTRICTED_CLUSTER_NAMES: dict = {}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SHARED HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -718,15 +729,15 @@ def run_posthoc(df: pd.DataFrame, anova_results: dict):
 # SECTION 2d — MULTIPLE REGRESSION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_regression(df: pd.DataFrame):
+def run_regression(df: pd.DataFrame, suffix: str = ""):
     """
-    Multiple regression for EXPENSE_RATIO and LIFESTYLE_RATIO.
+    Multiple regression for all five expense buckets plus total expenses.
     Excludes FLAG_EXTREME_RATIO rows (ratio > 5.0) and FLAG_INCOME_INVALID.
     Uses WLS with normalized survey weights.
-    Checks VIF for multicollinearity.
-    Produces: 02d_regression_expense.png, 02d_regression_lifestyle.png
+    suffix: appended to output filenames; "_restricted" for the second pass.
     """
-    sep("SECTION 2d — MULTIPLE REGRESSION")
+    label = "RESTRICTED — " if suffix else ""
+    sep(f"SECTION 2d — {label}MULTIPLE REGRESSION")
 
     # ── Sample preparation ─────────────────────────────────────────────────
     # Exclude extreme ratios — driven by near-zero income denominators,
@@ -749,18 +760,23 @@ def run_regression(df: pd.DataFrame):
 
     # Build predictor string — LOG_INCOME is key; all others are controls
     controls = (["LOG_INCOME", "FAM_SIZE", "HOMEOWNER", "NO_EARNR",
-                 "HAS_CHILDREN", "HAS_ELDERLY", "EDUC_REF_ORD"]
+                 "HAS_CHILDREN", "HAS_ELDERLY", "EDUC_REF_ORD", "AGE_REF"]
                 + region_dummies)
 
     formula_base = " + ".join(controls)
 
-    outcomes = ["EXPENSE_RATIO", "DISCRETIONARY_RATIO", "HOUSING_RATIO"]
+    outcomes = [
+        "EXPENSE_RATIO",
+        "HOUSING_RATIO",
+        "NECESSITY_RATIO",
+        "DISCRETIONARY_RATIO",
+        "RETIRE_RATIO",
+    ]
 
     print(f"\n  Model: outcome ~ {formula_base}")
     print(f"  Reference categories: South region")
-    print(f"  KEY VARIABLE: LOG_INCOME coefficient sign on DISCRETIONARY_RATIO")
-    print(f"    Positive → higher income predicts MORE discretionary spending")
-    print(f"    Negative → higher income predicts LESS discretionary spending")
+    print(f"  LOG_INCOME sign: negative = discipline (ratio shrinks with income); "
+          f"positive = creep/growth")
 
     model_results = {}
 
@@ -919,9 +935,11 @@ def run_regression(df: pd.DataFrame):
         fig.tight_layout()
 
         fname_map = {
-            "EXPENSE_RATIO":       "02d_regression_expense.png",
-            "DISCRETIONARY_RATIO": "02d_regression_discretionary.png",
-            "HOUSING_RATIO":       "02d_regression_housing.png",
+            "EXPENSE_RATIO":       f"02d_regression_expense{suffix}.png",
+            "HOUSING_RATIO":       f"02d_regression_housing{suffix}.png",
+            "NECESSITY_RATIO":     f"02d_regression_necessity{suffix}.png",
+            "DISCRETIONARY_RATIO": f"02d_regression_discretionary{suffix}.png",
+            "RETIRE_RATIO":        f"02d_regression_retirement{suffix}.png",
         }
         save_fig(fig, fname_map[col])
 
@@ -943,7 +961,10 @@ def run_regression(df: pd.DataFrame):
         # Recompute beta locally
         sub_full = reg_df[reg_df[col].notna()].copy()
         beta = b * (sub_full["LOG_INCOME"].std() / sub_full[col].std()) if sub_full[col].std() > 0 else np.nan
-        direction = "DISCIPLINE" if b < 0 else "CREEP"
+        if col == "RETIRE_RATIO":
+            direction = "MORE SAVING" if b > 0 else "LESS SAVING"
+        else:
+            direction = "DISCIPLINE" if b < 0 else "CREEP"
         print(f"  {get_ratio_meta(col)['label']:<22} {b:>12.4f} {beta:>12.4f} {p:>10.4f} {direction:>14}")
 
     return model_results
@@ -953,15 +974,15 @@ def run_regression(df: pd.DataFrame):
 # SECTION 2e — CLUSTER ANALYSIS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_clustering(df: pd.DataFrame):
+def run_clustering(df: pd.DataFrame, suffix: str = ""):
     """
     K-means behavioral cluster analysis.
     k selected by elbow (inertia) + silhouette score.
     Key exhibit: cluster membership by income quintile.
-    Produces: 02e_elbow_silhouette.png, 02e_cluster_profiles.png,
-              02e_cluster_by_quintile.png
+    suffix: appended to output filenames; "_restricted" for the second pass.
     """
-    sep("SECTION 2e — CLUSTER ANALYSIS")
+    label = "RESTRICTED — " if suffix else ""
+    sep(f"SECTION 2e — {label}CLUSTER ANALYSIS")
 
     # ── Feature set ────────────────────────────────────────────────────────
     # Behavioral and structural variables — income included as context,
@@ -978,6 +999,8 @@ def run_clustering(df: pd.DataFrame):
         "FAM_SIZE",
         "HOMEOWNER",
         "NO_EARNR",
+        "AGE_REF",
+        "EDUC_REF_ORD",
     ]
 
     # Sample: complete cases only, extreme ratios excluded
@@ -1051,7 +1074,7 @@ def run_clustering(df: pd.DataFrame):
                  "Choose k at elbow in inertia curve and peak in silhouette score.",
                  fontsize=11, fontweight="bold", y=1.03)
     fig.tight_layout()
-    save_fig(fig, "02e_elbow_silhouette.png")
+    save_fig(fig, f"02e_elbow_silhouette{suffix}.png")
 
     # ── Fit final model ────────────────────────────────────────────────────
     print(f"\n  Fitting final model with k={optimal_k}...")
@@ -1087,29 +1110,24 @@ def run_clustering(df: pd.DataFrame):
     #
     # ──────────────────────────────────────────────────────────────────────
     # EDIT THESE LABELS:
+    # Use RESTRICTED_CLUSTER_NAMES for the second pass; CLUSTER_NAMES for the first.
+    # Review the profiles printed above, fill in the appropriate dict, then re-run.
     CLUSTER_NAMES = {
-        0: "Modest Renters",
-        1: "Income-Constrained",
-        2: "Established Dual-Earners",
-        3: "Established Single-Earners",
-        4: "FIRE / Aggressive Savers",
-        # Examples of what you might set after reviewing profiles:
-        # 0: "Modest Renters",
-        # 1: "Income-Constrained",
-        # 2: "Established Dual-Earners",
-        # 3: "Established Single-Earners",
-        # 4: "FIRE / Aggressive Savers",
+        # 0: "...",
+        # 1: "...",
     }
     # ──────────────────────────────────────────────────────────────────────
 
+    names_dict = RESTRICTED_CLUSTER_NAMES if suffix else CLUSTER_NAMES
     cluster_labels = {}
     for k in range(optimal_k):
-        cluster_labels[k] = CLUSTER_NAMES.get(k, f"Cluster {k+1}")
+        cluster_labels[k] = names_dict.get(k, f"Cluster {k+1}")
 
-    print(f"\n  Cluster labels:")
+    print(f"\n  Cluster labels (n = sample, N = estimated U.S. households):")
     for k, lbl in cluster_labels.items():
-        n = (clust_df["CLUSTER"] == k).sum()
-        print(f"    Cluster {k+1}: {lbl}  (n={n:,})")
+        n     = (clust_df["CLUSTER"] == k).sum()
+        N_wtd = clust_df.loc[clust_df["CLUSTER"] == k, "FINLWT21"].sum()
+        print(f"    Cluster {k+1}: {lbl}  (n={n:,}, N≈{N_wtd/1e6:.1f}M households)")
 
     clust_df["CLUSTER_LABEL"] = clust_df["CLUSTER"].map(cluster_labels)
 
@@ -1129,6 +1147,8 @@ def run_clustering(df: pd.DataFrame):
         "FAM_SIZE":            "Family\nSize",
         "HOMEOWNER":           "Home-\nowner %",
         "NO_EARNR":            "Avg\nEarners",
+        "AGE_REF":             "Avg\nAge",
+        "EDUC_REF_ORD":        "Educ\nLevel",
     }
 
     # Order clusters by population (largest first)
@@ -1148,7 +1168,7 @@ def run_clustering(df: pd.DataFrame):
     hm_display = hm_data.copy()
     hm_normed  = (hm_data - hm_data.min()) / (hm_data.max() - hm_data.min() + 1e-9)
 
-    fig, ax = plt.subplots(figsize=(12, max(5, optimal_k * 1.2 + 2)))
+    fig, ax = plt.subplots(figsize=(15, max(5, optimal_k * 1.2 + 2)))
 
     import seaborn as sns
     # Build custom annotation array with human-readable formatting per column
@@ -1183,6 +1203,10 @@ def run_clustering(df: pd.DataFrame):
                 annot_strings[i, j] = f"{raw_val:.1f}"
             elif feat == "NO_EARNR":
                 annot_strings[i, j] = f"{raw_val:.1f}"
+            elif feat == "AGE_REF":
+                annot_strings[i, j] = f"{raw_val:.0f} yr"
+            elif feat == "EDUC_REF_ORD":
+                annot_strings[i, j] = f"{raw_val:.1f}"
             else:
                 annot_strings[i, j] = f"{raw_val:.2f}"
 
@@ -1208,16 +1232,17 @@ def run_clustering(df: pd.DataFrame):
         xy=(0, 1.01), xycoords="axes fraction",
         fontsize=8.5, color=PALETTE["gray"], ha="left")
 
-    # Population count annotations on the right margin
+    # Population count annotations on the right margin (sample n + weighted N)
     for i, k in enumerate(ordered_clusters):
-        n = (clust_df["CLUSTER"] == k).sum()
+        n     = (clust_df["CLUSTER"] == k).sum()
+        N_wtd = clust_df.loc[clust_df["CLUSTER"] == k, "FINLWT21"].sum()
         ax.text(len(heatmap_features) + 0.1, i + 0.5,
-                f"n={n:,}",
-                va="center", fontsize=9, color=PALETTE["gray"])
+                f"n={n:,}\n~{N_wtd/1e6:.1f}M HH",
+                va="center", fontsize=8.5, color=PALETTE["gray"])
 
     source_note(ax, "Ordered by weighted population (largest cluster on top).")
     fig.tight_layout()
-    save_fig(fig, "02e_cluster_profiles.png")
+    save_fig(fig, f"02e_cluster_profiles{suffix}.png")
 
     # ── THE KEY EXHIBIT: cluster composition by income quintile ───────────
     # This is the direct test of the Income Fallacy:
@@ -1287,16 +1312,108 @@ def run_clustering(df: pd.DataFrame):
     source_note(ax, "K-means clustering on behavioral variables. "
                     "Extreme ratios excluded.")
     fig.tight_layout()
-    save_fig(fig, "02e_cluster_by_quintile.png")
+    save_fig(fig, f"02e_cluster_by_quintile{suffix}.png")
 
     return clust_df, cluster_labels
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 2f — CLUSTER-BASED ANOVA
+# SECTION 2f — CLUSTER-BASED ANOVA + PAIRWISE EFFECT SIZES
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_cluster_anova(clust_df: pd.DataFrame, quintile_eta_sq: dict):
+def _run_cluster_cohens_d(df: pd.DataFrame, suffix: str = ""):
+    """
+    Pairwise Cohen's d heatmap across all behavioral clusters for each ratio.
+    Complements the ANOVA by showing WHICH cluster pairs differ and by how much,
+    rather than just confirming that differences exist.
+    suffix: appended to output filename.
+    """
+    import seaborn as sns
+
+    cluster_col   = "CLUSTER_LABEL"
+    cluster_order = sorted(df[cluster_col].dropna().unique())
+    n_c           = len(cluster_order)
+    ratio_keys    = list(RATIOS.keys())
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 13))
+    axes = axes.flatten()
+
+    for ax, col in zip(axes, ratio_keys):
+        meta = get_ratio_meta(col)
+
+        # Build n_c × n_c Cohen's d matrix (row - col direction)
+        d_matrix = np.full((n_c, n_c), np.nan)
+        for i, c1 in enumerate(cluster_order):
+            for j, c2 in enumerate(cluster_order):
+                if i == j:
+                    continue
+                g1 = df[df[cluster_col] == c1][col].dropna()
+                g2 = df[df[cluster_col] == c2][col].dropna()
+                if len(g1) > 1 and len(g2) > 1:
+                    d_matrix[i, j] = cohen_d(g1, g2)
+
+        # Symmetric color scale, min ±0.5 so color always has meaning
+        abs_max = float(np.nanmax(np.abs(d_matrix)))
+        vmax    = max(abs_max, 0.5)
+
+        # Annotation strings: "+1.23" or "—" on diagonal
+        annot = np.empty((n_c, n_c), dtype=object)
+        for i in range(n_c):
+            for j in range(n_c):
+                if i == j:
+                    annot[i, j] = "—"
+                elif np.isnan(d_matrix[i, j]):
+                    annot[i, j] = "n/a"
+                else:
+                    annot[i, j] = f"{d_matrix[i, j]:+.2f}"
+
+        # Plot with diagonal zeroed so it renders as neutral center color
+        d_plot = pd.DataFrame(d_matrix, index=cluster_order, columns=cluster_order)
+        np.fill_diagonal(d_plot.values, 0.0)
+
+        sns.heatmap(
+            d_plot,
+            ax=ax,
+            annot=annot,
+            fmt="",
+            annot_kws={"size": 9, "weight": "bold"},
+            cmap="RdBu_r",
+            center=0,
+            vmin=-vmax,
+            vmax=vmax,
+            linewidths=0.5,
+            linecolor="white",
+            cbar_kws={"label": "Cohen's d", "shrink": 0.5},
+        )
+
+        # Gray out diagonal cells so "—" is visually distinct from near-zero d
+        for i in range(n_c):
+            ax.add_patch(plt.Rectangle((i, i), 1, 1, fill=True,
+                                        color="#EEEEEE", zorder=3))
+            ax.text(i + 0.5, i + 0.5, "—",
+                    ha="center", va="center",
+                    fontsize=10, color=PALETTE["gray"], zorder=4)
+
+        ax.set_title(meta["label"], loc="left", fontsize=11)
+        ax.set_xticklabels(ax.get_xticklabels(),
+                           rotation=35, ha="right", fontsize=8)
+        ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=8)
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+
+    fig.suptitle(
+        "Pairwise Cohen's d Between Behavioral Clusters\n"
+        "Red = row cluster has HIGHER ratio than column cluster.  "
+        "Blue = row cluster has LOWER ratio.  "
+        "|d| < 0.2 trivial · 0.2–0.5 small · 0.5–0.8 medium · > 0.8 large",
+        fontsize=10, fontweight="bold", y=1.03,
+    )
+    fig.tight_layout()
+    save_fig(fig, f"02f_cluster_cohens_d{suffix}.png")
+
+
+def run_cluster_anova(clust_df: pd.DataFrame, quintile_eta_sq: dict,
+                      suffix: str = ""):
     """
     Re-run the same hypothesis tests as Section 2b but using behavioral
     cluster groupings instead of income quintiles.
@@ -1310,9 +1427,10 @@ def run_cluster_anova(clust_df: pd.DataFrame, quintile_eta_sq: dict):
     is essentially guaranteed. The interpretive value is in the EFFECT
     SIZES and post-hoc pairwise comparisons, not the p-values.
 
-    Produces: 02f_cluster_anova_effect_sizes.png, 02f_cluster_group_means.png
+    suffix: appended to output filenames; "_restricted" for the second pass.
     """
-    sep("SECTION 2f — CLUSTER-BASED ANOVA")
+    label = "RESTRICTED — " if suffix else ""
+    sep(f"SECTION 2f — {label}CLUSTER-BASED ANOVA")
 
     # Apply the same caps used in Section 2b for consistency
     cap = 5.0
@@ -1400,7 +1518,7 @@ def run_cluster_anova(clust_df: pd.DataFrame, quintile_eta_sq: dict):
     source_note(ax, "Cluster η² is naturally inflated since ratios were "
                     "clustering inputs. Compare relative magnitudes.")
     fig.tight_layout()
-    save_fig(fig, "02f_cluster_anova_effect_sizes.png")
+    save_fig(fig, f"02f_cluster_anova_effect_sizes{suffix}.png")
 
     # ── Cluster group means chart ──────────────────────────────────────────
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
@@ -1466,9 +1584,71 @@ def run_cluster_anova(clust_df: pd.DataFrame, quintile_eta_sq: dict):
                  "Error bars = bootstrapped 95% CI (300 iterations).",
                  fontsize=11, fontweight="bold")
     fig.tight_layout()
-    save_fig(fig, "02f_cluster_group_means.png")
+    save_fig(fig, f"02f_cluster_group_means{suffix}.png")
+
+    _run_cluster_cohens_d(df, suffix=suffix)
 
     return cluster_eta_sq
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RESTRICTED RE-ANALYSIS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_restricted_analysis(df: pd.DataFrame,
+                             clust_df: pd.DataFrame,
+                             quintile_eta_sq: dict):
+    """
+    Re-run clustering and regression after removing minority/outlier cluster
+    households identified in the initial pass.
+
+    Which clusters to drop is controlled by RESTRICTED_EXCLUDE_CLUSTER_INDICES
+    (0-based).  The remaining ~91% of households are re-clustered from scratch
+    (new elbow/silhouette/k selection) and all five regression models are re-fit
+    on the same restricted sample.
+
+    All outputs carry a '_restricted' filename suffix so they coexist with the
+    initial-pass figures in outputs/figures/.
+    """
+    if not RESTRICTED_EXCLUDE_CLUSTER_INDICES:
+        return
+
+    sep("RESTRICTED RE-ANALYSIS — MAIN CLUSTERS ONLY")
+
+    # ── Identify minority-cluster rows ────────────────────────────────────
+    excl_idx    = set(RESTRICTED_EXCLUDE_CLUSTER_INDICES)
+    minority_mask = clust_df["CLUSTER"].isin(excl_idx)
+    minority_idx  = clust_df[minority_mask].index
+
+    n_excl  = minority_mask.sum()
+    n_keep  = len(clust_df) - n_excl
+    pct_keep = n_keep / len(clust_df) * 100
+
+    excl_labels = [clust_df.loc[clust_df["CLUSTER"] == i, "CLUSTER_LABEL"].iloc[0]
+                   if (clust_df["CLUSTER"] == i).any() else f"Cluster {i+1}"
+                   for i in sorted(excl_idx)]
+
+    print(f"\n  Excluding {n_excl:,} rows from: {excl_labels}")
+    print(f"  Restricted sample: {n_keep:,} rows ({pct_keep:.1f}% of clustered sample)")
+
+    # ── Build restricted DataFrames ───────────────────────────────────────
+    # For clustering: use the already-cleaned clust_df (extreme/invalid already removed)
+    restricted_clust_input = clust_df[~minority_mask].copy()
+
+    # For regression: filter the full analysis df by the same row indices
+    # (minority_idx came from clust_df which is a subset of df)
+    restricted_df = df[~df.index.isin(minority_idx)].copy()
+
+    # ── Re-run clustering on restricted sample ────────────────────────────
+    restricted_clust_df, _ = run_clustering(restricted_clust_input,
+                                             suffix="_restricted")
+
+    # ── Re-run cluster ANOVA on new clusters ─────────────────────────────
+    run_cluster_anova(restricted_clust_df, quintile_eta_sq,
+                      suffix="_restricted")
+
+    # ── Re-run all five regression models on restricted sample ────────────
+    run_regression(restricted_df, suffix="_restricted")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1501,14 +1681,20 @@ def run_phase2():
 
     cluster_eta_sq = run_cluster_anova(clust_df, quintile_eta_sq)
 
+    # ── Restricted re-analysis (removes minority clusters, re-clusters, re-regresses)
+    if RESTRICTED_EXCLUDE_CLUSTER_INDICES:
+        run_restricted_analysis(df, clust_df, quintile_eta_sq)
+
     sep("PHASE 2 COMPLETE")
-    print(f"\n  12 figures saved to {OUTPUT_DIR}/")
+    n_figs = len([f for f in os.listdir(OUTPUT_DIR) if f.endswith(".png")])
+    print(f"\n  {n_figs} figures saved to {OUTPUT_DIR}/")
     print("\n  Key findings to bring into the report:")
     print("  1. ANOVA effect sizes — quintile η² vs cluster η² comparison")
-    print("  2. LOG_INCOME coefficient on LIFESTYLE_RATIO and HOUSING_RATIO")
-    print("     (negative on lifestyle + positive on housing = housing creep)")
+    print("  2. LOG_INCOME coefficient across all five expense models")
+    print("     (negative = discipline; for RETIRE_RATIO positive = more saving)")
     print("  3. Cluster composition chart — which quintiles contain which clusters?")
-    print("  4. Q1 sensitivity — do regression findings hold with Q1 excluded?\n")
+    print("  4. Restricted re-analysis — do patterns hold in the 91% main sample?")
+    print("  5. Q1 sensitivity — do regression findings hold with Q1 excluded?\n")
 
 
 if __name__ == "__main__":
